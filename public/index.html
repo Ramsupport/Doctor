@@ -504,16 +504,45 @@ function esc(s){if(!s)return'';const d=document.createElement('div');d.textConte
 function closeModal(id){document.getElementById(id).classList.remove('show')}
 
 // ═══ AUTH ═══
-// ═══ AUTH ═══
+async function doLogin() {
+  const username = document.getElementById('login-user').value.trim();
+  const password = document.getElementById('login-pass').value;
+  if (!username || !password) { document.getElementById('login-err').textContent = 'Enter username and password'; return; }
+  try {
+    const data = await fetch('/api/auth/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username, password}) }).then(r=>r.json());
+    if (data.error) { document.getElementById('login-err').textContent = data.error; return; }
+    TOKEN = data.token;
+    currentDoctor = data.doctor;
+    localStorage.setItem('cm_token', TOKEN);
+    showApp();
+  } catch(e) { document.getElementById('login-err').textContent = 'Login failed'; }
+}
+
 function doLogout() { 
   TOKEN = null; 
   currentDoctor = null; 
   localStorage.removeItem('cm_token'); 
   document.getElementById('app-shell').classList.remove('show'); 
   document.getElementById('login-screen').style.display='flex'; 
-  document.getElementById('login-err').textContent = '';
+  toggleAuthForm('login'); 
 }
 
+function toggleAuthForm(mode) {
+  document.getElementById('login-err').textContent = '';
+  if (mode === 'register') {
+    document.getElementById('login-form').style.display = 'none';
+    document.getElementById('register-form').style.display = 'block';
+    document.getElementById('auth-subtitle').textContent = 'Create a new doctor account';
+    document.getElementById('reg-name').focus();
+  } else {
+    document.getElementById('register-form').style.display = 'none';
+    document.getElementById('login-form').style.display = 'block';
+    document.getElementById('auth-subtitle').textContent = 'Sign in to your account';
+    document.getElementById('login-user').focus();
+  }
+}
+
+document.getElementById('login-pass')?.addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
 document.getElementById('reg-clinic')?.addEventListener('keydown', e => { if(e.key==='Enter') doRegister(); });
 
 async function doRegister() {
