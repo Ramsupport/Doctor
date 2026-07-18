@@ -173,19 +173,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   <div class="login-box">
     <div class="logo-icon">🏥</div>
     <h1>Clinic Manager</h1>
-    <div class="subtitle" id="auth-subtitle">Create a new doctor account</div>
+    <div class="subtitle" id="auth-subtitle">Sign in to your account</div>
     <div class="login-err" id="login-err"></div>
-    <!-- Register Form -->
-    <div id="register-form">
-      <input type="text" id="reg-name" placeholder="Full Name (Dr. ...)" autofocus>
-      <input type="text" id="reg-user" placeholder="Username (letters, numbers, _)">
-      <input type="password" id="reg-pass" placeholder="Password (min 6 chars)">
-      <input type="text" id="reg-qual" placeholder="Qualifications (e.g. MBBS, MD)">
-      <input type="text" id="reg-clinic" placeholder="Clinic Name">
-      <button onclick="doRegister()">Create Account</button>
+    <!-- Login Form -->
+    <div id="login-form">
+      <input type="text" id="login-user" placeholder="Username" autofocus>
+      <input type="password" id="login-pass" placeholder="Password">
+      <button onclick="doLogin()">Sign In</button>
+      <p style="margin-top:16px;font-size:13px;color:var(--tx2)">Don't have an account? <a href="#" onclick="toggleAuthForm('register');return false" style="color:var(--pri);font-weight:500">Register</a></p>
     </div>
-  </div>
-</div>
     <!-- Register Form -->
     <div id="register-form" style="display:none">
       <input type="text" id="reg-name" placeholder="Full Name (Dr. ...)">
@@ -198,7 +194,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     </div>
   </div>
 </div>
-
+  
 <!-- APP SHELL -->
 <div id="app-shell">
 <aside class="sidebar" id="sidebar">
