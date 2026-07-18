@@ -4,6 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Clinic Manager</title>
+<meta name="theme-color" content="#0F766E">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -167,11 +173,25 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   <div class="login-box">
     <div class="logo-icon">🏥</div>
     <h1>Clinic Manager</h1>
-    <div class="subtitle">Enter your credentials to continue</div>
+    <div class="subtitle" id="auth-subtitle">Sign in to your account</div>
     <div class="login-err" id="login-err"></div>
-    <input type="text" id="login-user" placeholder="Username" autofocus>
-    <input type="password" id="login-pass" placeholder="Password">
-    <button onclick="doLogin()">Sign In</button>
+    <!-- Login Form -->
+    <div id="login-form">
+      <input type="text" id="login-user" placeholder="Username" autofocus>
+      <input type="password" id="login-pass" placeholder="Password">
+      <button onclick="doLogin()">Sign In</button>
+      <p style="margin-top:16px;font-size:13px;color:var(--tx2)">Don't have an account? <a href="#" onclick="toggleAuthForm('register');return false" style="color:var(--pri);font-weight:500">Register</a></p>
+    </div>
+    <!-- Register Form -->
+    <div id="register-form" style="display:none">
+      <input type="text" id="reg-name" placeholder="Full Name (Dr. ...)">
+      <input type="text" id="reg-user" placeholder="Username (letters, numbers, _)">
+      <input type="password" id="reg-pass" placeholder="Password (min 6 chars)">
+      <input type="text" id="reg-qual" placeholder="Qualifications (e.g. MBBS, MD)">
+      <input type="text" id="reg-clinic" placeholder="Clinic Name">
+      <button onclick="doRegister()">Create Account</button>
+      <p style="margin-top:16px;font-size:13px;color:var(--tx2)">Already have an account? <a href="#" onclick="toggleAuthForm('login');return false" style="color:var(--pri);font-weight:500">Sign In</a></p>
+    </div>
   </div>
 </div>
 
@@ -199,7 +219,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div style="display:flex;align-items:center;gap:16px">
       <div class="quick-search">
         <span class="si">🔍</span>
-        <input type="text" id="global-search" placeholder="Search patients..." autocomplete="off">
+        <input type="text" id="global-search" placeholder="Search by name or phone..." autocomplete="off">
         <div class="quick-results" id="quick-results"></div>
       </div>
       <div class="user-info">
@@ -375,6 +395,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
         </div>
       </div>
       <div class="tab-content" id="tab-set-stats">
+        <div class="panel"><div class="panel-header"><h3>📱 Mobile App & Notifications</h3></div><div class="panel-body">
+          <p style="color:var(--tx2);font-size:13px;margin-bottom:16px">Install this app on your phone and enable push notifications to receive appointment reminders every morning at 8 AM.</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-pri" id="push-btn" onclick="enablePushNotifications()">🔔 Enable Push Notifications</button>
+            <button class="btn btn-sec" id="install-btn" onclick="installApp()" style="display:none">📲 Install App</button>
+          </div>
+          <p id="push-status" style="font-size:12px;color:var(--tx3);margin-top:8px"></p>
+          <p id="ios-hint" style="display:none;font-size:12px;color:var(--acc);margin-top:8px">On iPhone: tap Share → Add to Home Screen to install.</p>
+        </div></div>
         <div class="panel"><div class="panel-header"><h3>System Statistics</h3></div><div class="panel-body" id="sys-stats-content"></div></div>
       </div>
     </div>
@@ -488,8 +517,40 @@ async function doLogin() {
     showApp();
   } catch(e) { document.getElementById('login-err').textContent = 'Login failed'; }
 }
-function doLogout() { TOKEN = null; currentDoctor = null; localStorage.removeItem('cm_token'); document.getElementById('app-shell').classList.remove('show'); document.getElementById('login-screen').style.display='flex'; }
+function doLogout() { TOKEN = null; currentDoctor = null; localStorage.removeItem('cm_token'); document.getElementById('app-shell').classList.remove('show'); document.getElementById('login-screen').style.display='flex'; toggleAuthForm('login'); }
+function toggleAuthForm(mode) {
+  document.getElementById('login-err').textContent = '';
+  if (mode === 'register') {
+    document.getElementById('login-form').style.display = 'none';
+    document.getElementById('register-form').style.display = 'block';
+    document.getElementById('auth-subtitle').textContent = 'Create a new doctor account';
+    document.getElementById('reg-name').focus();
+  } else {
+    document.getElementById('register-form').style.display = 'none';
+    document.getElementById('login-form').style.display = 'block';
+    document.getElementById('auth-subtitle').textContent = 'Sign in to your account';
+    document.getElementById('login-user').focus();
+  }
+}
 document.getElementById('login-pass').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+document.getElementById('reg-clinic')?.addEventListener('keydown', e => { if(e.key==='Enter') doRegister(); });
+
+async function doRegister() {
+  const name = document.getElementById('reg-name').value.trim();
+  const username = document.getElementById('reg-user').value.trim();
+  const password = document.getElementById('reg-pass').value;
+  const qualifications = document.getElementById('reg-qual').value.trim();
+  const clinic_name = document.getElementById('reg-clinic').value.trim();
+  if (!name || !username || !password) { document.getElementById('login-err').textContent = 'Name, username and password required'; return; }
+  try {
+    const data = await fetch('/api/auth/register', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name, username, password, qualifications, clinic_name}) }).then(r=>r.json());
+    if (data.error) { document.getElementById('login-err').textContent = data.error; return; }
+    TOKEN = data.token; currentDoctor = data.doctor;
+    localStorage.setItem('cm_token', TOKEN);
+    toast('Account created! Complete your profile in Settings.', 'ok');
+    showApp();
+  } catch(e) { document.getElementById('login-err').textContent = 'Registration failed'; }
+}
 
 async function showApp() {
   document.getElementById('login-screen').style.display='none';
@@ -550,7 +611,7 @@ document.querySelectorAll('#report-tabs .tab').forEach(t=>{
 // Settings tab handlers
 document.querySelectorAll('#settings-tabs .tab').forEach(t=>{
   t.addEventListener('click',()=>{
-    if(t.dataset.tab==='set-stats')loadSystemStats();
+    if(t.dataset.tab==='set-stats'){loadSystemStats();checkPushState();}
   });
 });
 
@@ -811,8 +872,60 @@ async function loadSystemStats(){
   catch(e){toast(e.message,'err')}
 }
 
+// ═══ PUSH NOTIFICATIONS & PWA ═══
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); deferredInstallPrompt = e; const btn = document.getElementById('install-btn'); if(btn) btn.style.display = 'inline-flex'; });
+
+async function enablePushNotifications() {
+  const btn = document.getElementById('push-btn');
+  const status = document.getElementById('push-status');
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) { status.textContent = 'Push notifications not supported in this browser.'; return; }
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') { status.textContent = 'Notification permission denied.'; return; }
+    const resp = await fetch('/api/push/vapid-key');
+    if (!resp.ok) { status.textContent = 'Push not configured on server. Set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY env vars.'; return; }
+    const { publicKey } = await resp.json();
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(publicKey) });
+    await api('/api/push/subscribe', { method: 'POST', body: { subscription: sub } });
+    btn.textContent = '✅ Notifications Enabled'; btn.disabled = true; btn.style.opacity = '.6';
+    status.textContent = 'You will receive appointment reminders at 8 AM daily.';
+  } catch (e) { status.textContent = 'Error: ' + e.message; }
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64); const arr = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; ++i) arr[i] = raw.charCodeAt(i);
+  return arr;
+}
+
+function installApp() {
+  if (deferredInstallPrompt) { deferredInstallPrompt.prompt(); deferredInstallPrompt = null; document.getElementById('install-btn').style.display = 'none'; }
+}
+
+// Check push state on settings load
+async function checkPushState() {
+  if (!('PushManager' in window)) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) { const btn = document.getElementById('push-btn'); btn.textContent = '✅ Notifications Enabled'; btn.disabled = true; btn.style.opacity = '.6'; document.getElementById('push-status').textContent = 'Appointment reminders active.'; }
+  } catch(e) {}
+  // iOS hint
+  if (/iPad|iPhone|iPod/.test(navigator.userAgent) && !window.navigator.standalone) {
+    const hint = document.getElementById('ios-hint'); if(hint) hint.style.display = 'block';
+  }
+}
+
 // ═══ INIT ═══
 (async function(){
+  // Register service worker
+  if ('serviceWorker' in navigator) {
+    try { await navigator.serviceWorker.register('/sw.js'); } catch(e) { console.log('SW registration failed:', e); }
+  }
   document.getElementById('appt-date').value=new Date().toISOString().split('T')[0];
   const today=new Date();const ago=new Date(today);ago.setDate(ago.getDate()-30);
   const ts=today.toISOString().split('T')[0];const as=ago.toISOString().split('T')[0];
