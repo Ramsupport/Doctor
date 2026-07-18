@@ -2,15 +2,45 @@ const express = require('express');
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const webpush = require('web-push');
+const cron = require('node-cron');
 const path = require('path');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
+
+// ─── Security Headers ────────────────────────────────────────────
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_URL?.includes('railway') ? { rejectUnauthorized: false } : false });
 const JWT_SECRET = process.env.JWT_SECRET || 'clinic-mgr-secret-change-me';
 const JWT_EXPIRY = '8h';
+
+// ─── Rate Limiter (login brute-force protection) ─────────────────
+const loginAttempts = new Map();
+function rateLimit(req, res, next) {
+  const ip = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
+  const window = 60000; // 1 minute
+  const maxAttempts = 5;
+  const entry = loginAttempts.get(ip) || { count: 0, start: now };
+  if (now - entry.start > window) { entry.count = 0; entry.start = now; }
+  entry.count++;
+  loginAttempts.set(ip, entry);
+  if (entry.count > maxAttempts) return res.status(429).json({ error: 'Too many login attempts. Please wait 1 minute.' });
+  next();
+}
+// Clean up rate limiter every 5 minutes
+setInterval(() => { const now = Date.now(); for (const [k, v] of loginAttempts) { if (now - v.start > 60000) loginAttempts.delete(k); } }, 300000);
 
 // ─── Database Init ───────────────────────────────────────────────
 async function initDB() {
@@ -30,83 +60,57 @@ async function initDB() {
       is_active BOOLEAN DEFAULT true,
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS patients (
       id SERIAL PRIMARY KEY,
       doctor_id INTEGER REFERENCES doctors(id) ON DELETE CASCADE,
-      name VARCHAR(255) NOT NULL,
-      dob DATE,
-      gender VARCHAR(10),
-      contact VARCHAR(20) NOT NULL,
-      email VARCHAR(255),
-      address TEXT,
-      blood_group VARCHAR(5),
-      allergies TEXT,
-      medical_history TEXT,
-      notes TEXT,
+      name VARCHAR(255) NOT NULL, dob DATE, gender VARCHAR(10),
+      contact VARCHAR(20) NOT NULL, email VARCHAR(255), address TEXT,
+      blood_group VARCHAR(5), allergies TEXT, medical_history TEXT, notes TEXT,
       is_active BOOLEAN DEFAULT true,
-      created_at TIMESTAMPTZ DEFAULT NOW(),
-      updated_at TIMESTAMPTZ DEFAULT NOW()
+      created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS visits (
       id SERIAL PRIMARY KEY,
       patient_id INTEGER REFERENCES patients(id) ON DELETE CASCADE,
       doctor_id INTEGER REFERENCES doctors(id) ON DELETE CASCADE,
       visit_date TIMESTAMPTZ DEFAULT NOW(),
-      chief_complaint TEXT,
-      examination TEXT,
-      diagnosis TEXT,
-      notes TEXT,
-      bp_systolic INTEGER,
-      bp_diastolic INTEGER,
-      pulse INTEGER,
-      temperature DECIMAL(4,1),
-      weight DECIMAL(5,1),
-      height DECIMAL(5,1),
-      spo2 INTEGER,
-      follow_up_date DATE,
-      created_at TIMESTAMPTZ DEFAULT NOW()
+      chief_complaint TEXT, examination TEXT, diagnosis TEXT, notes TEXT,
+      bp_systolic INTEGER, bp_diastolic INTEGER, pulse INTEGER,
+      temperature DECIMAL(4,1), weight DECIMAL(5,1), height DECIMAL(5,1), spo2 INTEGER,
+      follow_up_date DATE, created_at TIMESTAMPTZ DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS prescriptions (
       id SERIAL PRIMARY KEY,
       visit_id INTEGER REFERENCES visits(id) ON DELETE CASCADE,
       patient_id INTEGER REFERENCES patients(id) ON DELETE CASCADE,
-      medicines JSONB DEFAULT '[]',
-      advice TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW()
+      medicines JSONB DEFAULT '[]', advice TEXT, created_at TIMESTAMPTZ DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS charges (
       id SERIAL PRIMARY KEY,
       visit_id INTEGER REFERENCES visits(id) ON DELETE SET NULL,
       patient_id INTEGER REFERENCES patients(id) ON DELETE CASCADE,
       doctor_id INTEGER REFERENCES doctors(id) ON DELETE CASCADE,
-      description VARCHAR(255) NOT NULL,
-      amount DECIMAL(10,2) NOT NULL,
-      payment_mode VARCHAR(20) DEFAULT 'cash',
-      payment_status VARCHAR(20) DEFAULT 'paid',
-      charge_date TIMESTAMPTZ DEFAULT NOW(),
-      notes TEXT,
-      created_at TIMESTAMPTZ DEFAULT NOW()
+      description VARCHAR(255) NOT NULL, amount DECIMAL(10,2) NOT NULL,
+      payment_mode VARCHAR(20) DEFAULT 'cash', payment_status VARCHAR(20) DEFAULT 'paid',
+      charge_date TIMESTAMPTZ DEFAULT NOW(), notes TEXT, created_at TIMESTAMPTZ DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS appointments (
       id SERIAL PRIMARY KEY,
       patient_id INTEGER REFERENCES patients(id) ON DELETE CASCADE,
       doctor_id INTEGER REFERENCES doctors(id) ON DELETE CASCADE,
-      appointment_date DATE NOT NULL,
-      appointment_time TIME,
-      status VARCHAR(20) DEFAULT 'scheduled',
-      reason TEXT,
-      notes TEXT,
+      appointment_date DATE NOT NULL, appointment_time TIME,
+      status VARCHAR(20) DEFAULT 'scheduled', reason TEXT, notes TEXT,
+      created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id SERIAL PRIMARY KEY,
+      doctor_id INTEGER REFERENCES doctors(id) ON DELETE CASCADE,
+      subscription JSONB NOT NULL,
       created_at TIMESTAMPTZ DEFAULT NOW(),
-      updated_at TIMESTAMPTZ DEFAULT NOW()
+      UNIQUE(doctor_id)
     );
   `);
 
-  // Indexes
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_patients_doctor ON patients(doctor_id);
     CREATE INDEX IF NOT EXISTS idx_patients_contact ON patients(contact);
@@ -114,23 +118,28 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_visits_patient ON visits(patient_id);
     CREATE INDEX IF NOT EXISTS idx_visits_doctor ON visits(doctor_id);
     CREATE INDEX IF NOT EXISTS idx_visits_date ON visits(visit_date);
-    CREATE INDEX IF NOT EXISTS idx_charges_patient ON charges(patient_id);
     CREATE INDEX IF NOT EXISTS idx_charges_doctor ON charges(doctor_id);
     CREATE INDEX IF NOT EXISTS idx_charges_date ON charges(charge_date);
     CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(appointment_date);
     CREATE INDEX IF NOT EXISTS idx_appointments_doctor ON appointments(doctor_id);
   `);
 
-  // Seed default admin doctor if no doctors exist
+  // Seed default admin
   const { rows } = await pool.query('SELECT COUNT(*) FROM doctors');
   if (parseInt(rows[0].count) === 0) {
     const hash = await bcrypt.hash('admin123', 10);
-    await pool.query(
-      `INSERT INTO doctors (username, password_hash, name, qualifications, clinic_name, role)
-       VALUES ('admin', $1, 'Dr. Admin', 'MBBS', 'My Clinic', 'admin')`, [hash]
-    );
-    console.log('Default admin created — username: admin, password: admin123');
+    await pool.query(`INSERT INTO doctors (username,password_hash,name,qualifications,clinic_name,role) VALUES ('admin',$1,'Dr. Admin','MBBS','My Clinic','admin')`, [hash]);
+    console.log('Default admin created — admin / admin123');
   }
+
+  // VAPID setup
+  if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+    webpush.setVapidDetails('mailto:support@gizmohub.co.in', process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
+    console.log('VAPID push configured');
+  } else {
+    console.log('VAPID keys not set — push notifications disabled. Set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY env vars.');
+  }
+
   console.log('Database initialized');
 }
 
@@ -146,12 +155,44 @@ function auth(req, res, next) {
   } catch (e) { return res.status(401).json({ error: 'Invalid or expired token' }); }
 }
 
+// ─── Push Notification Helper ────────────────────────────────────
+async function sendPushToDoctor(doctorId, payload) {
+  if (!process.env.VAPID_PUBLIC_KEY) return;
+  try {
+    const { rows } = await pool.query('SELECT subscription FROM push_subscriptions WHERE doctor_id=$1', [doctorId]);
+    if (!rows.length) return;
+    const sub = rows[0].subscription;
+    await webpush.sendNotification(sub, JSON.stringify(payload));
+  } catch (e) {
+    if (e.statusCode === 410 || e.statusCode === 404) {
+      await pool.query('DELETE FROM push_subscriptions WHERE doctor_id=$1', [doctorId]);
+    }
+    console.error('Push error:', e.message);
+  }
+}
+
+async function sendPushToAll(payload) {
+  if (!process.env.VAPID_PUBLIC_KEY) return;
+  try {
+    const { rows } = await pool.query('SELECT doctor_id, subscription FROM push_subscriptions');
+    for (const row of rows) {
+      try {
+        await webpush.sendNotification(row.subscription, JSON.stringify(payload));
+      } catch (e) {
+        if (e.statusCode === 410 || e.statusCode === 404) {
+          await pool.query('DELETE FROM push_subscriptions WHERE doctor_id=$1', [row.doctor_id]);
+        }
+      }
+    }
+  } catch (e) { console.error('Push broadcast error:', e.message); }
+}
+
 // ─── Auth Routes ─────────────────────────────────────────────────
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', rateLimit, async (req, res) => {
   try {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-    const { rows } = await pool.query('SELECT * FROM doctors WHERE username = $1 AND is_active = true', [username]);
+    const { rows } = await pool.query('SELECT * FROM doctors WHERE username=$1 AND is_active=true', [username]);
     if (!rows.length) return res.status(401).json({ error: 'Invalid credentials' });
     const doc = rows[0];
     const valid = await bcrypt.compare(password, doc.password_hash);
@@ -161,20 +202,25 @@ app.post('/api/auth/login', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/auth/register', auth, async (req, res) => {
+// PUBLIC self-registration — any doctor can register
+app.post('/api/auth/register', async (req, res) => {
   try {
-    if (req.doctorRole !== 'admin') return res.status(403).json({ error: 'Only admin can register doctors' });
     const { username, password, name, qualifications, clinic_name } = req.body;
-    if (!username || !password || !name) return res.status(400).json({ error: 'Username, password and name required' });
+    if (!username || !password || !name) return res.status(400).json({ error: 'Name, username and password are required' });
+    if (username.length < 3) return res.status(400).json({ error: 'Username must be at least 3 characters' });
+    if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) return res.status(400).json({ error: 'Username can only contain letters, numbers and underscore' });
     const hash = await bcrypt.hash(password, 10);
     const { rows } = await pool.query(
-      `INSERT INTO doctors (username, password_hash, name, qualifications, clinic_name)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id, username, name, role`,
-      [username, hash, name, qualifications || '', clinic_name || '']
+      `INSERT INTO doctors (username,password_hash,name,qualifications,clinic_name) VALUES ($1,$2,$3,$4,$5) RETURNING id,username,name,role`,
+      [username.toLowerCase(), hash, name, qualifications || '', clinic_name || '']
     );
-    res.json(rows[0]);
+    // Auto-login after registration
+    const doc = rows[0];
+    const token = jwt.sign({ id: doc.id, username: doc.username, role: doc.role }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
+    res.json({ token, doctor: doc });
   } catch (e) {
-    if (e.code === '23505') return res.status(409).json({ error: 'Username already exists' });
+    if (e.code === '23505') return res.status(409).json({ error: 'Username already taken' });
     res.status(500).json({ error: e.message });
   }
 });
@@ -183,24 +229,47 @@ app.post('/api/auth/change-password', auth, async (req, res) => {
   try {
     const { current_password, new_password } = req.body;
     if (!current_password || !new_password) return res.status(400).json({ error: 'Both passwords required' });
-    if (new_password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
-    const { rows } = await pool.query('SELECT password_hash FROM doctors WHERE id = $1', [req.doctorId]);
+    if (new_password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    const { rows } = await pool.query('SELECT password_hash FROM doctors WHERE id=$1', [req.doctorId]);
     const valid = await bcrypt.compare(current_password, rows[0].password_hash);
     if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
     const hash = await bcrypt.hash(new_password, 10);
-    await pool.query('UPDATE doctors SET password_hash = $1 WHERE id = $2', [hash, req.doctorId]);
+    await pool.query('UPDATE doctors SET password_hash=$1 WHERE id=$2', [hash, req.doctorId]);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ─── Doctor Profile / Settings ───────────────────────────────────
+// ─── Push Notification Routes ────────────────────────────────────
+app.get('/api/push/vapid-key', (req, res) => {
+  if (!process.env.VAPID_PUBLIC_KEY) return res.status(404).json({ error: 'Push not configured' });
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY });
+});
+
+app.post('/api/push/subscribe', auth, async (req, res) => {
+  try {
+    const { subscription } = req.body;
+    if (!subscription) return res.status(400).json({ error: 'Subscription required' });
+    await pool.query(
+      `INSERT INTO push_subscriptions (doctor_id,subscription) VALUES ($1,$2)
+       ON CONFLICT (doctor_id) DO UPDATE SET subscription=$2, created_at=NOW()`,
+      [req.doctorId, JSON.stringify(subscription)]
+    );
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/push/subscribe', auth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM push_subscriptions WHERE doctor_id=$1', [req.doctorId]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ─── Doctor Profile ──────────────────────────────────────────────
 app.get('/api/profile', auth, async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      'SELECT id, username, name, qualifications, registration_number, clinic_name, clinic_address, clinic_phone, consultation_fee, role, created_at FROM doctors WHERE id = $1',
-      [req.doctorId]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Doctor not found' });
+    const { rows } = await pool.query('SELECT id,username,name,qualifications,registration_number,clinic_name,clinic_address,clinic_phone,consultation_fee,role,created_at FROM doctors WHERE id=$1', [req.doctorId]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -209,8 +278,8 @@ app.put('/api/profile', auth, async (req, res) => {
   try {
     const { name, qualifications, registration_number, clinic_name, clinic_address, clinic_phone, consultation_fee } = req.body;
     const { rows } = await pool.query(
-      `UPDATE doctors SET name=$1, qualifications=$2, registration_number=$3, clinic_name=$4, clinic_address=$5, clinic_phone=$6, consultation_fee=$7
-       WHERE id=$8 RETURNING id, username, name, qualifications, registration_number, clinic_name, clinic_address, clinic_phone, consultation_fee, role`,
+      `UPDATE doctors SET name=$1,qualifications=$2,registration_number=$3,clinic_name=$4,clinic_address=$5,clinic_phone=$6,consultation_fee=$7
+       WHERE id=$8 RETURNING id,username,name,qualifications,registration_number,clinic_name,clinic_address,clinic_phone,consultation_fee,role`,
       [name, qualifications, registration_number, clinic_name, clinic_address, clinic_phone, consultation_fee || 500, req.doctorId]
     );
     res.json(rows[0]);
@@ -246,13 +315,13 @@ app.get('/api/dashboard', auth, async (req, res) => {
 app.get('/api/patients', auth, async (req, res) => {
   try {
     const did = req.doctorId;
-    const { search, page = 1, limit = 20 } = req.query;
+    const { search, page = 1, limit = 15 } = req.query;
     const offset = (page - 1) * limit;
     let query, countQuery, params;
     if (search && search.trim()) {
       const s = `%${search.trim()}%`;
-      query = `SELECT * FROM patients WHERE doctor_id=$1 AND is_active=true AND (LOWER(name) LIKE LOWER($2) OR contact LIKE $2) ORDER BY name ASC LIMIT $3 OFFSET $4`;
-      countQuery = `SELECT COUNT(*) FROM patients WHERE doctor_id=$1 AND is_active=true AND (LOWER(name) LIKE LOWER($2) OR contact LIKE $2)`;
+      query = `SELECT * FROM patients WHERE doctor_id=$1 AND is_active=true AND (LOWER(name) LIKE LOWER($2) OR contact LIKE $2 OR LOWER(email) LIKE LOWER($2)) ORDER BY name ASC LIMIT $3 OFFSET $4`;
+      countQuery = `SELECT COUNT(*) FROM patients WHERE doctor_id=$1 AND is_active=true AND (LOWER(name) LIKE LOWER($2) OR contact LIKE $2 OR LOWER(email) LIKE LOWER($2))`;
       params = [did, s, limit, offset];
     } else {
       query = `SELECT * FROM patients WHERE doctor_id=$1 AND is_active=true ORDER BY updated_at DESC LIMIT $2 OFFSET $3`;
@@ -283,9 +352,9 @@ app.get('/api/patients/:id', auth, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM patients WHERE id=$1 AND doctor_id=$2', [req.params.id, req.doctorId]);
     if (!rows.length) return res.status(404).json({ error: 'Patient not found' });
-    const stats = await pool.query('SELECT COUNT(*) as visit_count, MAX(visit_date) as last_visit FROM visits WHERE patient_id=$1 AND doctor_id=$2', [req.params.id, req.doctorId]);
-    const totalCharges = await pool.query(`SELECT COALESCE(SUM(amount),0) as total_charges, COALESCE(SUM(CASE WHEN payment_status='pending' THEN amount ELSE 0 END),0) as pending FROM charges WHERE patient_id=$1 AND doctor_id=$2`, [req.params.id, req.doctorId]);
-    res.json({ ...rows[0], visit_count: parseInt(stats.rows[0].visit_count), last_visit: stats.rows[0].last_visit, total_charges: parseFloat(totalCharges.rows[0].total_charges), pending_amount: parseFloat(totalCharges.rows[0].pending) });
+    const stats = await pool.query('SELECT COUNT(*) as visit_count,MAX(visit_date) as last_visit FROM visits WHERE patient_id=$1 AND doctor_id=$2', [req.params.id, req.doctorId]);
+    const tc = await pool.query(`SELECT COALESCE(SUM(amount),0) as total_charges,COALESCE(SUM(CASE WHEN payment_status='pending' THEN amount ELSE 0 END),0) as pending FROM charges WHERE patient_id=$1 AND doctor_id=$2`, [req.params.id, req.doctorId]);
+    res.json({ ...rows[0], visit_count: parseInt(stats.rows[0].visit_count), last_visit: stats.rows[0].last_visit, total_charges: parseFloat(tc.rows[0].total_charges), pending_amount: parseFloat(tc.rows[0].pending) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -398,7 +467,6 @@ app.put('/api/visits/:id', auth, async (req, res) => {
   finally { client.release(); }
 });
 
-// ─── Prescription print ──────────────────────────────────────────
 app.get('/api/visits/:id/prescription', auth, async (req, res) => {
   try {
     const visit = await pool.query(`SELECT v.*,p.name as patient_name,p.dob as patient_dob,p.gender as patient_gender,p.contact as patient_contact,p.allergies as patient_allergies
@@ -412,31 +480,22 @@ app.get('/api/visits/:id/prescription', auth, async (req, res) => {
 
 // ─── Charges ─────────────────────────────────────────────────────
 app.get('/api/patients/:id/charges', auth, async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT * FROM charges WHERE patient_id=$1 AND doctor_id=$2 ORDER BY charge_date DESC', [req.params.id, req.doctorId]);
-    res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  try { const { rows } = await pool.query('SELECT * FROM charges WHERE patient_id=$1 AND doctor_id=$2 ORDER BY charge_date DESC', [req.params.id, req.doctorId]); res.json(rows); } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.post('/api/charges', auth, async (req, res) => {
   try {
     const { patient_id, visit_id, description, amount, payment_mode, payment_status, notes } = req.body;
-    const { rows } = await pool.query(
-      'INSERT INTO charges (patient_id,visit_id,doctor_id,description,amount,payment_mode,payment_status,notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
-      [patient_id, visit_id||null, req.doctorId, description, amount, payment_mode||'cash', payment_status||'paid', notes]
-    );
+    const { rows } = await pool.query('INSERT INTO charges (patient_id,visit_id,doctor_id,description,amount,payment_mode,payment_status,notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
+      [patient_id, visit_id||null, req.doctorId, description, amount, payment_mode||'cash', payment_status||'paid', notes]);
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
 app.put('/api/charges/:id', auth, async (req, res) => {
   try {
     const { description, amount, payment_mode, payment_status, notes } = req.body;
-    const { rows } = await pool.query(
-      'UPDATE charges SET description=$1,amount=$2,payment_mode=$3,payment_status=$4,notes=$5 WHERE id=$6 AND doctor_id=$7 RETURNING *',
-      [description, amount, payment_mode, payment_status, notes, req.params.id, req.doctorId]
-    );
-    if (!rows.length) return res.status(404).json({ error: 'Charge not found' });
+    const { rows } = await pool.query('UPDATE charges SET description=$1,amount=$2,payment_mode=$3,payment_status=$4,notes=$5 WHERE id=$6 AND doctor_id=$7 RETURNING *',
+      [description, amount, payment_mode, payment_status, notes, req.params.id, req.doctorId]);
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -465,7 +524,10 @@ app.post('/api/appointments', auth, async (req, res) => {
       [patient_id, req.doctorId, appointment_date, appointment_time||null, reason, notes]
     );
     const full = await pool.query('SELECT a.*,p.name as patient_name,p.contact as patient_contact FROM appointments a JOIN patients p ON a.patient_id=p.id WHERE a.id=$1', [rows[0].id]);
-    res.json(full.rows[0]);
+    // Send push notification
+    const appt = full.rows[0];
+    sendPushToDoctor(req.doctorId, { title: '📅 New Appointment', body: `${appt.patient_name} — ${appointment_date}${appointment_time ? ' at ' + appointment_time : ''}`, url: '/' });
+    res.json(appt);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -478,7 +540,7 @@ app.put('/api/appointments/:id', auth, async (req, res) => {
        WHERE id=$6 AND doctor_id=$7 RETURNING *`,
       [appointment_date, appointment_time, status, reason, notes, req.params.id, req.doctorId]
     );
-    if (!rows.length) return res.status(404).json({ error: 'Appointment not found' });
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -486,25 +548,20 @@ app.put('/api/appointments/:id', auth, async (req, res) => {
 // ─── Reports ─────────────────────────────────────────────────────
 app.get('/api/reports/revenue', auth, async (req, res) => {
   try {
-    const did = req.doctorId;
-    const { from, to, group_by = 'day' } = req.query;
+    const did = req.doctorId; const { from, to, group_by = 'day' } = req.query;
     const fmt = group_by === 'month' ? 'YYYY-MM' : 'YYYY-MM-DD';
-    let query = `SELECT to_char(charge_date,'${fmt}') as period,SUM(CASE WHEN payment_status='paid' THEN amount ELSE 0 END) as paid,SUM(CASE WHEN payment_status='pending' THEN amount ELSE 0 END) as pending,SUM(amount) as total,COUNT(*) as count FROM charges WHERE doctor_id=$1`;
-    const params = [did];
-    if (from) { params.push(from); query += ` AND charge_date>=$${params.length}`; }
-    if (to) { params.push(to+'T23:59:59'); query += ` AND charge_date<=$${params.length}`; }
-    query += ' GROUP BY period ORDER BY period DESC';
-    const { rows } = await pool.query(query, params);
-    let modeQuery = `SELECT payment_mode,SUM(amount) as total,COUNT(*) as count FROM charges WHERE doctor_id=$1 AND payment_status='paid'`;
-    const mp = [did];
-    if (from) { mp.push(from); modeQuery += ` AND charge_date>=$${mp.length}`; }
-    if (to) { mp.push(to+'T23:59:59'); modeQuery += ` AND charge_date<=$${mp.length}`; }
-    modeQuery += ' GROUP BY payment_mode';
-    const modes = await pool.query(modeQuery, mp);
+    let q = `SELECT to_char(charge_date,'${fmt}') as period,SUM(CASE WHEN payment_status='paid' THEN amount ELSE 0 END) as paid,SUM(CASE WHEN payment_status='pending' THEN amount ELSE 0 END) as pending,SUM(amount) as total,COUNT(*) as count FROM charges WHERE doctor_id=$1`;
+    const p = [did];
+    if (from) { p.push(from); q += ` AND charge_date>=$${p.length}`; }
+    if (to) { p.push(to+'T23:59:59'); q += ` AND charge_date<=$${p.length}`; }
+    q += ' GROUP BY period ORDER BY period DESC';
+    const { rows } = await pool.query(q, p);
+    let mq = `SELECT payment_mode,SUM(amount) as total,COUNT(*) as count FROM charges WHERE doctor_id=$1 AND payment_status='paid'`;
+    const mp = [did]; if (from) { mp.push(from); mq += ` AND charge_date>=$${mp.length}`; } if (to) { mp.push(to+'T23:59:59'); mq += ` AND charge_date<=$${mp.length}`; }
+    mq += ' GROUP BY payment_mode';
+    const modes = await pool.query(mq, mp);
     let tq = `SELECT COALESCE(SUM(amount),0) as grand_total,COALESCE(SUM(CASE WHEN payment_status='paid' THEN amount ELSE 0 END),0) as total_paid,COALESCE(SUM(CASE WHEN payment_status='pending' THEN amount ELSE 0 END),0) as total_pending,COUNT(*) as total_transactions FROM charges WHERE doctor_id=$1`;
-    const tp = [did];
-    if (from) { tp.push(from); tq += ` AND charge_date>=$${tp.length}`; }
-    if (to) { tp.push(to+'T23:59:59'); tq += ` AND charge_date<=$${tp.length}`; }
+    const tp = [did]; if (from) { tp.push(from); tq += ` AND charge_date>=$${tp.length}`; } if (to) { tp.push(to+'T23:59:59'); tq += ` AND charge_date<=$${tp.length}`; }
     const totals = await pool.query(tq, tp);
     res.json({ periods: rows, modes: modes.rows, summary: totals.rows[0] });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -512,14 +569,10 @@ app.get('/api/reports/revenue', auth, async (req, res) => {
 
 app.get('/api/reports/patients', auth, async (req, res) => {
   try {
-    const did = req.doctorId;
-    const { from, to } = req.query;
+    const did = req.doctorId; const { from, to } = req.query;
     let rq = `SELECT to_char(created_at,'YYYY-MM-DD') as period,COUNT(*) as count FROM patients WHERE doctor_id=$1 AND is_active=true`;
-    const rp = [did];
-    if (from) { rp.push(from); rq += ` AND created_at>=$${rp.length}`; }
-    if (to) { rp.push(to+'T23:59:59'); rq += ` AND created_at<=$${rp.length}`; }
-    rq += ' GROUP BY period ORDER BY period DESC';
-    const regs = await pool.query(rq, rp);
+    const rp = [did]; if (from) { rp.push(from); rq += ` AND created_at>=$${rp.length}`; } if (to) { rp.push(to+'T23:59:59'); rq += ` AND created_at<=$${rp.length}`; }
+    rq += ' GROUP BY period ORDER BY period DESC'; const regs = await pool.query(rq, rp);
     const gd = await pool.query("SELECT COALESCE(gender,'Not specified') as gender,COUNT(*) as count FROM patients WHERE doctor_id=$1 AND is_active=true GROUP BY gender", [did]);
     const ad = await pool.query(`SELECT CASE WHEN dob IS NULL THEN 'Unknown' WHEN EXTRACT(YEAR FROM age(dob))<18 THEN '0-17' WHEN EXTRACT(YEAR FROM age(dob))<30 THEN '18-29' WHEN EXTRACT(YEAR FROM age(dob))<45 THEN '30-44' WHEN EXTRACT(YEAR FROM age(dob))<60 THEN '45-59' ELSE '60+' END as age_group,COUNT(*) as count FROM patients WHERE doctor_id=$1 AND is_active=true GROUP BY age_group ORDER BY age_group`, [did]);
     const total = await pool.query('SELECT COUNT(*) FROM patients WHERE doctor_id=$1 AND is_active=true', [did]);
@@ -529,44 +582,30 @@ app.get('/api/reports/patients', auth, async (req, res) => {
 
 app.get('/api/reports/visits', auth, async (req, res) => {
   try {
-    const did = req.doctorId;
-    const { from, to, search, page = 1, limit = 50 } = req.query;
-    const offset = (page - 1) * limit;
-    let query = `SELECT v.*,p.name as patient_name,p.contact as patient_contact FROM visits v JOIN patients p ON v.patient_id=p.id WHERE v.doctor_id=$1`;
-    const params = [did];
-    if (from) { params.push(from); query += ` AND v.visit_date>=$${params.length}`; }
-    if (to) { params.push(to+'T23:59:59'); query += ` AND v.visit_date<=$${params.length}`; }
-    if (search) { params.push(`%${search}%`); query += ` AND (LOWER(p.name) LIKE LOWER($${params.length}) OR p.contact LIKE $${params.length} OR LOWER(v.diagnosis) LIKE LOWER($${params.length}))`; }
-    const countQ = query.replace(/SELECT v\.\*.*?FROM/, 'SELECT COUNT(*) FROM');
-    params.push(limit); query += ` ORDER BY v.visit_date DESC LIMIT $${params.length}`;
-    params.push(offset); query += ` OFFSET $${params.length}`;
-    const [{ rows }, cntRes] = await Promise.all([pool.query(query, params), pool.query(countQ, params.slice(0, -2))]);
+    const did = req.doctorId; const { from, to, search, page = 1, limit = 50 } = req.query; const offset = (page - 1) * limit;
+    let q = `SELECT v.*,p.name as patient_name,p.contact as patient_contact FROM visits v JOIN patients p ON v.patient_id=p.id WHERE v.doctor_id=$1`;
+    const prms = [did];
+    if (from) { prms.push(from); q += ` AND v.visit_date>=$${prms.length}`; }
+    if (to) { prms.push(to+'T23:59:59'); q += ` AND v.visit_date<=$${prms.length}`; }
+    if (search) { prms.push(`%${search}%`); q += ` AND (LOWER(p.name) LIKE LOWER($${prms.length}) OR p.contact LIKE $${prms.length} OR LOWER(v.diagnosis) LIKE LOWER($${prms.length}))`; }
+    const cntQ = q.replace(/SELECT v\.\*.*?FROM/, 'SELECT COUNT(*) FROM');
+    prms.push(limit); q += ` ORDER BY v.visit_date DESC LIMIT $${prms.length}`;
+    prms.push(offset); q += ` OFFSET $${prms.length}`;
+    const [{ rows }, cntRes] = await Promise.all([pool.query(q, prms), pool.query(cntQ, prms.slice(0, -2))]);
     res.json({ visits: rows, total: parseInt(cntRes.rows[0].count) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/reports/export/:type', auth, async (req, res) => {
   try {
-    const did = req.doctorId;
-    const { type } = req.params;
-    const { from, to } = req.query;
-    let rows, headers;
-    if (type === 'revenue') {
-      const r = await pool.query(`SELECT c.charge_date,p.name as patient_name,p.contact,c.description,c.amount,c.payment_mode,c.payment_status FROM charges c JOIN patients p ON c.patient_id=p.id WHERE c.doctor_id=$1 AND ($2::date IS NULL OR c.charge_date>=$2) AND ($3::date IS NULL OR c.charge_date<=$3::date+1) ORDER BY c.charge_date DESC`, [did, from||null, to||null]);
-      rows = r.rows; headers = ['Date','Patient','Contact','Description','Amount','Payment Mode','Status'];
-    } else if (type === 'visits') {
-      const r = await pool.query(`SELECT v.visit_date,p.name,p.contact,v.chief_complaint,v.diagnosis,v.bp_systolic,v.bp_diastolic,v.pulse,v.temperature,v.weight FROM visits v JOIN patients p ON v.patient_id=p.id WHERE v.doctor_id=$1 AND ($2::date IS NULL OR v.visit_date>=$2) AND ($3::date IS NULL OR v.visit_date<=$3::date+1) ORDER BY v.visit_date DESC`, [did, from||null, to||null]);
-      rows = r.rows; headers = ['Date','Patient','Contact','Complaint','Diagnosis','BP Sys','BP Dia','Pulse','Temp','Weight'];
-    } else if (type === 'patients') {
-      const r = await pool.query('SELECT name,contact,dob,gender,blood_group,email,address,allergies,created_at FROM patients WHERE doctor_id=$1 AND is_active=true ORDER BY name', [did]);
-      rows = r.rows; headers = ['Name','Contact','DOB','Gender','Blood Group','Email','Address','Allergies','Registered'];
-    } else return res.status(400).json({ error: 'Invalid type' });
+    const did = req.doctorId; const { type } = req.params; const { from, to } = req.query; let rows, headers;
+    if (type === 'revenue') { const r = await pool.query(`SELECT c.charge_date,p.name,p.contact,c.description,c.amount,c.payment_mode,c.payment_status FROM charges c JOIN patients p ON c.patient_id=p.id WHERE c.doctor_id=$1 AND ($2::date IS NULL OR c.charge_date>=$2) AND ($3::date IS NULL OR c.charge_date<=$3::date+1) ORDER BY c.charge_date DESC`,[did,from||null,to||null]); rows=r.rows; headers=['Date','Patient','Contact','Description','Amount','Mode','Status']; }
+    else if (type === 'visits') { const r = await pool.query(`SELECT v.visit_date,p.name,p.contact,v.chief_complaint,v.diagnosis,v.bp_systolic,v.bp_diastolic,v.pulse,v.temperature,v.weight FROM visits v JOIN patients p ON v.patient_id=p.id WHERE v.doctor_id=$1 AND ($2::date IS NULL OR v.visit_date>=$2) AND ($3::date IS NULL OR v.visit_date<=$3::date+1) ORDER BY v.visit_date DESC`,[did,from||null,to||null]); rows=r.rows; headers=['Date','Patient','Contact','Complaint','Diagnosis','BP Sys','BP Dia','Pulse','Temp','Weight']; }
+    else if (type === 'patients') { const r = await pool.query('SELECT name,contact,dob,gender,blood_group,email,address,allergies,created_at FROM patients WHERE doctor_id=$1 AND is_active=true ORDER BY name',[did]); rows=r.rows; headers=['Name','Contact','DOB','Gender','Blood','Email','Address','Allergies','Registered']; }
+    else return res.status(400).json({ error: 'Invalid type' });
     const esc = v => { const s = String(v??''); return s.includes(',')||s.includes('"')||s.includes('\n') ? `"${s.replace(/"/g,'""')}"` : s; };
-    let csv = headers.join(',') + '\n';
-    rows.forEach(row => { csv += Object.values(row).map(esc).join(',') + '\n'; });
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename=${type}_report.csv`);
-    res.send(csv);
+    let csv = headers.join(',')+'\n'; rows.forEach(row => { csv += Object.values(row).map(esc).join(',')+'\n'; });
+    res.setHeader('Content-Type','text/csv'); res.setHeader('Content-Disposition',`attachment; filename=${type}_report.csv`); res.send(csv);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -574,24 +613,17 @@ app.get('/api/reports/export/:type', auth, async (req, res) => {
 app.get('/api/backup', auth, async (req, res) => {
   try {
     const did = req.doctorId;
-    const [patients, visits, prescriptions, charges, appointments, doctor] = await Promise.all([
-      pool.query('SELECT * FROM patients WHERE doctor_id=$1', [did]),
-      pool.query('SELECT * FROM visits WHERE doctor_id=$1', [did]),
-      pool.query('SELECT pr.* FROM prescriptions pr JOIN visits v ON pr.visit_id=v.id WHERE v.doctor_id=$1', [did]),
-      pool.query('SELECT * FROM charges WHERE doctor_id=$1', [did]),
-      pool.query('SELECT * FROM appointments WHERE doctor_id=$1', [did]),
-      pool.query('SELECT name,qualifications,registration_number,clinic_name,clinic_address,clinic_phone,consultation_fee FROM doctors WHERE id=$1', [did])
+    const [patients,visits,prescriptions,charges,appointments,doctor] = await Promise.all([
+      pool.query('SELECT * FROM patients WHERE doctor_id=$1',[did]), pool.query('SELECT * FROM visits WHERE doctor_id=$1',[did]),
+      pool.query('SELECT pr.* FROM prescriptions pr JOIN visits v ON pr.visit_id=v.id WHERE v.doctor_id=$1',[did]),
+      pool.query('SELECT * FROM charges WHERE doctor_id=$1',[did]), pool.query('SELECT * FROM appointments WHERE doctor_id=$1',[did]),
+      pool.query('SELECT name,qualifications,registration_number,clinic_name,clinic_address,clinic_phone,consultation_fee FROM doctors WHERE id=$1',[did])
     ]);
-    const backup = {
-      version: '1.0',
-      app: 'clinic-manager',
-      exported_at: new Date().toISOString(),
-      doctor_info: doctor.rows[0],
-      counts: { patients: patients.rows.length, visits: visits.rows.length, prescriptions: prescriptions.rows.length, charges: charges.rows.length, appointments: appointments.rows.length },
-      data: { patients: patients.rows, visits: visits.rows, prescriptions: prescriptions.rows, charges: charges.rows, appointments: appointments.rows }
+    const backup = { version:'1.0', app:'clinic-manager', exported_at: new Date().toISOString(), doctor_info: doctor.rows[0],
+      counts: { patients:patients.rows.length, visits:visits.rows.length, prescriptions:prescriptions.rows.length, charges:charges.rows.length, appointments:appointments.rows.length },
+      data: { patients:patients.rows, visits:visits.rows, prescriptions:prescriptions.rows, charges:charges.rows, appointments:appointments.rows }
     };
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Content-Disposition', `attachment; filename=clinic-backup-${new Date().toISOString().split('T')[0]}.json`);
+    res.setHeader('Content-Type','application/json'); res.setHeader('Content-Disposition',`attachment; filename=clinic-backup-${new Date().toISOString().split('T')[0]}.json`);
     res.send(JSON.stringify(backup, null, 2));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -599,98 +631,63 @@ app.get('/api/backup', auth, async (req, res) => {
 app.get('/api/backup/stats', auth, async (req, res) => {
   try {
     const did = req.doctorId;
-    const [p, v, pr, c, a] = await Promise.all([
-      pool.query('SELECT COUNT(*) FROM patients WHERE doctor_id=$1', [did]),
-      pool.query('SELECT COUNT(*) FROM visits WHERE doctor_id=$1', [did]),
-      pool.query('SELECT COUNT(*) FROM prescriptions pr JOIN visits vt ON pr.visit_id=vt.id WHERE vt.doctor_id=$1', [did]),
-      pool.query('SELECT COUNT(*) FROM charges WHERE doctor_id=$1', [did]),
-      pool.query('SELECT COUNT(*) FROM appointments WHERE doctor_id=$1', [did])
+    const [p,v,pr,c,a] = await Promise.all([
+      pool.query('SELECT COUNT(*) FROM patients WHERE doctor_id=$1',[did]), pool.query('SELECT COUNT(*) FROM visits WHERE doctor_id=$1',[did]),
+      pool.query('SELECT COUNT(*) FROM prescriptions pr JOIN visits vt ON pr.visit_id=vt.id WHERE vt.doctor_id=$1',[did]),
+      pool.query('SELECT COUNT(*) FROM charges WHERE doctor_id=$1',[did]), pool.query('SELECT COUNT(*) FROM appointments WHERE doctor_id=$1',[did])
     ]);
-    res.json({ patients: parseInt(p.rows[0].count), visits: parseInt(v.rows[0].count), prescriptions: parseInt(pr.rows[0].count), charges: parseInt(c.rows[0].count), appointments: parseInt(a.rows[0].count) });
+    res.json({ patients:parseInt(p.rows[0].count), visits:parseInt(v.rows[0].count), prescriptions:parseInt(pr.rows[0].count), charges:parseInt(c.rows[0].count), appointments:parseInt(a.rows[0].count) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/restore', auth, async (req, res) => {
   const client = await pool.connect();
   try {
-    const backup = req.body;
-    if (!backup || backup.app !== 'clinic-manager' || !backup.data) return res.status(400).json({ error: 'Invalid backup file' });
+    const backup = req.body; if (!backup || backup.app !== 'clinic-manager' || !backup.data) return res.status(400).json({ error: 'Invalid backup file' });
     const did = req.doctorId;
     await client.query('BEGIN');
-    // Delete existing data in FK-safe order
     await client.query('DELETE FROM prescriptions WHERE visit_id IN (SELECT id FROM visits WHERE doctor_id=$1)', [did]);
     await client.query('DELETE FROM charges WHERE doctor_id=$1', [did]);
     await client.query('DELETE FROM visits WHERE doctor_id=$1', [did]);
     await client.query('DELETE FROM appointments WHERE doctor_id=$1', [did]);
     await client.query('DELETE FROM patients WHERE doctor_id=$1', [did]);
-
-    const d = backup.data;
-    const patientMap = {};
-    // Insert patients
-    for (const p of (d.patients || [])) {
-      const r = await client.query(
-        `INSERT INTO patients (doctor_id,name,dob,gender,contact,email,address,blood_group,allergies,medical_history,notes,is_active,created_at,updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
-        [did, p.name, p.dob||null, p.gender, p.contact, p.email, p.address, p.blood_group, p.allergies, p.medical_history, p.notes, p.is_active!==false, p.created_at||new Date(), p.updated_at||new Date()]
-      );
-      patientMap[p.id] = r.rows[0].id;
-    }
-    // Insert visits
+    const d = backup.data; const patientMap = {};
+    for (const p of (d.patients||[])) { const r = await client.query(`INSERT INTO patients (doctor_id,name,dob,gender,contact,email,address,blood_group,allergies,medical_history,notes,is_active,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`, [did,p.name,p.dob||null,p.gender,p.contact,p.email,p.address,p.blood_group,p.allergies,p.medical_history,p.notes,p.is_active!==false,p.created_at||new Date(),p.updated_at||new Date()]); patientMap[p.id]=r.rows[0].id; }
     const visitMap = {};
-    for (const v of (d.visits || [])) {
-      const newPid = patientMap[v.patient_id];
-      if (!newPid) continue;
-      const r = await client.query(
-        `INSERT INTO visits (patient_id,doctor_id,visit_date,chief_complaint,examination,diagnosis,notes,bp_systolic,bp_diastolic,pulse,temperature,weight,height,spo2,follow_up_date,created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
-        [newPid, did, v.visit_date, v.chief_complaint, v.examination, v.diagnosis, v.notes, v.bp_systolic, v.bp_diastolic, v.pulse, v.temperature, v.weight, v.height, v.spo2, v.follow_up_date, v.created_at||new Date()]
-      );
-      visitMap[v.id] = r.rows[0].id;
-    }
-    // Insert prescriptions
-    for (const pr of (d.prescriptions || [])) {
-      const newVid = visitMap[pr.visit_id];
-      const newPid = patientMap[pr.patient_id];
-      if (!newVid || !newPid) continue;
-      await client.query('INSERT INTO prescriptions (visit_id,patient_id,medicines,advice,created_at) VALUES ($1,$2,$3,$4,$5)',
-        [newVid, newPid, typeof pr.medicines === 'string' ? pr.medicines : JSON.stringify(pr.medicines), pr.advice, pr.created_at||new Date()]);
-    }
-    // Insert charges
-    for (const ch of (d.charges || [])) {
-      const newPid = patientMap[ch.patient_id];
-      if (!newPid) continue;
-      const newVid = ch.visit_id ? visitMap[ch.visit_id] : null;
-      await client.query(
-        'INSERT INTO charges (visit_id,patient_id,doctor_id,description,amount,payment_mode,payment_status,charge_date,notes,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
-        [newVid, newPid, did, ch.description, ch.amount, ch.payment_mode, ch.payment_status, ch.charge_date, ch.notes, ch.created_at||new Date()]
-      );
-    }
-    // Insert appointments
-    for (const a of (d.appointments || [])) {
-      const newPid = patientMap[a.patient_id];
-      if (!newPid) continue;
-      await client.query(
-        'INSERT INTO appointments (patient_id,doctor_id,appointment_date,appointment_time,status,reason,notes,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-        [newPid, did, a.appointment_date, a.appointment_time, a.status, a.reason, a.notes, a.created_at||new Date(), a.updated_at||new Date()]
-      );
-    }
+    for (const v of (d.visits||[])) { const np=patientMap[v.patient_id]; if(!np)continue; const r = await client.query(`INSERT INTO visits (patient_id,doctor_id,visit_date,chief_complaint,examination,diagnosis,notes,bp_systolic,bp_diastolic,pulse,temperature,weight,height,spo2,follow_up_date,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`, [np,did,v.visit_date,v.chief_complaint,v.examination,v.diagnosis,v.notes,v.bp_systolic,v.bp_diastolic,v.pulse,v.temperature,v.weight,v.height,v.spo2,v.follow_up_date,v.created_at||new Date()]); visitMap[v.id]=r.rows[0].id; }
+    for (const pr of (d.prescriptions||[])) { const nv=visitMap[pr.visit_id]; const np=patientMap[pr.patient_id]; if(!nv||!np)continue; await client.query('INSERT INTO prescriptions (visit_id,patient_id,medicines,advice,created_at) VALUES ($1,$2,$3,$4,$5)', [nv,np,typeof pr.medicines==='string'?pr.medicines:JSON.stringify(pr.medicines),pr.advice,pr.created_at||new Date()]); }
+    for (const ch of (d.charges||[])) { const np=patientMap[ch.patient_id]; if(!np)continue; await client.query('INSERT INTO charges (visit_id,patient_id,doctor_id,description,amount,payment_mode,payment_status,charge_date,notes,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)', [ch.visit_id?visitMap[ch.visit_id]:null,np,did,ch.description,ch.amount,ch.payment_mode,ch.payment_status,ch.charge_date,ch.notes,ch.created_at||new Date()]); }
+    for (const a of (d.appointments||[])) { const np=patientMap[a.patient_id]; if(!np)continue; await client.query('INSERT INTO appointments (patient_id,doctor_id,appointment_date,appointment_time,status,reason,notes,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)', [np,did,a.appointment_date,a.appointment_time,a.status,a.reason,a.notes,a.created_at||new Date(),a.updated_at||new Date()]); }
     await client.query('COMMIT');
-    res.json({ success: true, restored: { patients: Object.keys(patientMap).length, visits: Object.keys(visitMap).length, charges: (d.charges||[]).length, appointments: (d.appointments||[]).length } });
+    res.json({ success:true, restored:{ patients:Object.keys(patientMap).length, visits:Object.keys(visitMap).length } });
   } catch (e) { await client.query('ROLLBACK'); res.status(500).json({ error: e.message }); }
   finally { client.release(); }
 });
 
-// ─── Doctor Management (admin only) ──────────────────────────────
-app.get('/api/doctors', auth, async (req, res) => {
-  try {
-    if (req.doctorRole !== 'admin') return res.status(403).json({ error: 'Admin only' });
-    const { rows } = await pool.query('SELECT id,username,name,qualifications,clinic_name,role,is_active,created_at FROM doctors ORDER BY created_at');
-    res.json(rows);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 // SPA fallback
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+
+// ─── Cron: Daily appointment reminders at 8 AM ──────────────────
+cron.schedule('0 8 * * *', async () => {
+  console.log('Running daily appointment reminder cron...');
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const { rows } = await pool.query(
+      `SELECT a.doctor_id, COUNT(*) as cnt, STRING_AGG(p.name, ', ' ORDER BY a.appointment_time ASC NULLS LAST) as names
+       FROM appointments a JOIN patients p ON a.patient_id=p.id
+       WHERE a.appointment_date=$1 AND a.status='scheduled'
+       GROUP BY a.doctor_id`, [today]
+    );
+    for (const row of rows) {
+      await sendPushToDoctor(row.doctor_id, {
+        title: `📅 ${row.cnt} appointment${row.cnt > 1 ? 's' : ''} today`,
+        body: row.names,
+        url: '/'
+      });
+    }
+    console.log(`Sent appointment reminders to ${rows.length} doctor(s)`);
+  } catch (e) { console.error('Cron error:', e.message); }
+}, { timezone: 'Asia/Kolkata' });
 
 const PORT = process.env.PORT || 3000;
 initDB().then(() => {
