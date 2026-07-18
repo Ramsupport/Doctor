@@ -574,9 +574,13 @@ app.post('/api/expenses', auth, async (req, res) => {
   try {
     const { description, amount, expense_date } = req.body;
     if (!description || !amount) return res.status(400).json({ error: 'Description and amount required' });
+    
+    // Determine the date in JavaScript to avoid PostgreSQL parameter typing errors
+    const finalDate = expense_date ? expense_date : new Date();
+    
     const { rows } = await pool.query(
-      'INSERT INTO expenses (doctor_id, description, amount, expense_date) VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE)) RETURNING *',
-      [req.doctorId, description, amount, expense_date || null]
+      'INSERT INTO expenses (doctor_id, description, amount, expense_date) VALUES ($1, $2, $3, $4) RETURNING *',
+      [req.doctorId, description, amount, finalDate]
     );
     res.json(rows[0]);
   } catch (e) { res.status(500).json({ error: e.message }); }
