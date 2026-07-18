@@ -92,6 +92,14 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW(),
       UNIQUE(doctor_id)
     );
+    CREATE TABLE IF NOT EXISTS expenses (
+      id SERIAL PRIMARY KEY,
+      doctor_id INTEGER REFERENCES doctors(id) ON DELETE CASCADE,
+      description VARCHAR(255) NOT NULL,
+      amount DECIMAL(10,2) NOT NULL,
+      expense_date DATE DEFAULT CURRENT_DATE,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
   `);
 
   await pool.query(`
@@ -105,6 +113,8 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_charges_date ON charges(charge_date);
     CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(appointment_date);
     CREATE INDEX IF NOT EXISTS idx_appointments_doctor ON appointments(doctor_id);
+    CREATE INDEX IF NOT EXISTS idx_expenses_doctor ON expenses(doctor_id);
+    CREATE INDEX IF NOT EXISTS idx_expenses_date ON expenses(expense_date);
   `);
 
   // No default admin — doctors self-register via the Register page
@@ -546,25 +556,92 @@ app.put('/api/appointments/:id', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ─── Expenses ────────────────────────────────────────────────────
+app.get('/api/expenses', auth, async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    let q = 'SELECT * FROM expenses WHERE doctor_id=$1';
+    const p = [req.doctorId];
+    if (from) { p.push(from); q += ` AND expense_date>=$${p.length}`; }
+    if (to) { p.push(to); q += ` AND expense_date<=$${p.length}`; }
+    q += ' ORDER BY expense_date DESC';
+    const { rows } = await pool.query(q, p);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/expenses', auth, async (req, res) => {
+  try {
+    const { description, amount, expense_date } = req.body;
+    if (!description || !amount) return res.status(400).json({ error: 'Description and amount required' });
+    const { rows } = await pool.query(
+      'INSERT INTO expenses (doctor_id, description, amount, expense_date) VALUES ($1, $2, $3, COALESCE($4, CURRENT_DATE)) RETURNING *',
+      [req.doctorId, description, amount, expense_date || null]
+    );
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.delete('/api/expenses/:id', auth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM expenses WHERE id=$1 AND doctor_id=$2', [req.params.id, req.doctorId]);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ─── Reports ─────────────────────────────────────────────────────
 app.get('/api/reports/revenue', auth, async (req, res) => {
   try {
-    const did = req.doctorId; const { from, to, group_by = 'day' } = req.query;
+    const did = req.doctorId; 
+    const { from, to, group_by = 'day' } = req.query;
     const fmt = group_by === 'month' ? 'YYYY-MM' : 'YYYY-MM-DD';
-    let q = `SELECT to_char(charge_date,'${fmt}') as period,SUM(CASE WHEN payment_status='paid' THEN amount ELSE 0 END) as paid,SUM(CASE WHEN payment_status='pending' THEN amount ELSE 0 END) as pending,SUM(amount) as total,COUNT(*) as count FROM charges WHERE doctor_id=$1`;
-    const p = [did];
-    if (from) { p.push(from); q += ` AND charge_date>=$${p.length}`; }
-    if (to) { p.push(to+'T23:59:59'); q += ` AND charge_date<=$${p.length}`; }
-    q += ' GROUP BY period ORDER BY period DESC';
-    const { rows } = await pool.query(q, p);
-    let mq = `SELECT payment_mode,SUM(amount) as total,COUNT(*) as count FROM charges WHERE doctor_id=$1 AND payment_status='paid'`;
-    const mp = [did]; if (from) { mp.push(from); mq += ` AND charge_date>=$${mp.length}`; } if (to) { mp.push(to+'T23:59:59'); mq += ` AND charge_date<=$${mp.length}`; }
-    mq += ' GROUP BY payment_mode';
-    const modes = await pool.query(mq, mp);
-    let tq = `SELECT COALESCE(SUM(amount),0) as grand_total,COALESCE(SUM(CASE WHEN payment_status='paid' THEN amount ELSE 0 END),0) as total_paid,COALESCE(SUM(CASE WHEN payment_status='pending' THEN amount ELSE 0 END),0) as total_pending,COUNT(*) as total_transactions FROM charges WHERE doctor_id=$1`;
+    
+    // Revenue query
+    let rq = `SELECT to_char(charge_date,'${fmt}') as period, SUM(CASE WHEN payment_status='paid' THEN amount ELSE 0 END) as paid, SUM(CASE WHEN payment_status='pending' THEN amount ELSE 0 END) as pending FROM charges WHERE doctor_id=$1`;
+    const rp = [did];
+    if (from) { rp.push(from); rq += ` AND charge_date>=$${rp.length}`; }
+    if (to) { rp.push(to+'T23:59:59'); rq += ` AND charge_date<=$${rp.length}`; }
+    rq += ' GROUP BY period';
+
+    // Expense query
+    let eq = `SELECT to_char(expense_date,'${fmt}') as period, SUM(amount) as expenses FROM expenses WHERE doctor_id=$1`;
+    const ep = [did];
+    if (from) { ep.push(from); eq += ` AND expense_date>=$${ep.length}`; }
+    if (to) { ep.push(to); eq += ` AND expense_date<=$${ep.length}`; }
+    eq += ' GROUP BY period';
+
+    const [revRes, expRes] = await Promise.all([pool.query(rq, rp), pool.query(eq, ep)]);
+    
+    // Merge revenue and expenses by period
+    const periods = {};
+    revRes.rows.forEach(r => {
+        periods[r.period] = { period: r.period, revenue: parseFloat(r.paid), pending: parseFloat(r.pending), expenses: 0, profit: parseFloat(r.paid) };
+    });
+    expRes.rows.forEach(e => {
+        if (!periods[e.period]) periods[e.period] = { period: e.period, revenue: 0, pending: 0, expenses: 0, profit: 0 };
+        periods[e.period].expenses = parseFloat(e.expenses);
+        periods[e.period].profit = periods[e.period].revenue - periods[e.period].expenses;
+    });
+    
+    const mergedPeriods = Object.values(periods).sort((a,b) => b.period.localeCompare(a.period));
+
+    // Summary totals
+    let tq = `SELECT COALESCE(SUM(CASE WHEN payment_status='paid' THEN amount ELSE 0 END),0) as total_revenue, COALESCE(SUM(CASE WHEN payment_status='pending' THEN amount ELSE 0 END),0) as total_pending FROM charges WHERE doctor_id=$1`;
     const tp = [did]; if (from) { tp.push(from); tq += ` AND charge_date>=$${tp.length}`; } if (to) { tp.push(to+'T23:59:59'); tq += ` AND charge_date<=$${tp.length}`; }
-    const totals = await pool.query(tq, tp);
-    res.json({ periods: rows, modes: modes.rows, summary: totals.rows[0] });
+    
+    let teq = `SELECT COALESCE(SUM(amount),0) as total_expenses FROM expenses WHERE doctor_id=$1`;
+    const tep = [did]; if (from) { tep.push(from); teq += ` AND expense_date>=$${tep.length}`; } if (to) { tep.push(to); teq += ` AND expense_date<=$${tep.length}`; }
+
+    const [totRev, totExp] = await Promise.all([pool.query(tq, tp), pool.query(teq, tep)]);
+    
+    const summary = {
+        total_revenue: parseFloat(totRev.rows[0].total_revenue),
+        total_pending: parseFloat(totRev.rows[0].total_pending),
+        total_expenses: parseFloat(totExp.rows[0].total_expenses),
+        net_profit: parseFloat(totRev.rows[0].total_revenue) - parseFloat(totExp.rows[0].total_expenses)
+    };
+
+    res.json({ periods: mergedPeriods, summary });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
