@@ -341,7 +341,8 @@ app.get('/api/patients', auth, async (req, res) => {
     const [{ rows }, countRes] = await Promise.all([
       pool.query(query, params),
       pool.query(countQuery, search?.trim() ? [did, `%${search.trim().replace(/\s+/g, '%')}%`] : [did])
-    res.json({ patients: rows, total: parseInt(countRes.rows[0].count), page: parseInt(page), limit: parseInt(limit) });
+     ]);
+      res.json({ patients: rows, total: parseInt(countRes.rows[0].count), page: parseInt(page), limit: parseInt(limit) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
