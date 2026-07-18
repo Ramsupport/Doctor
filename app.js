@@ -124,13 +124,7 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_appointments_doctor ON appointments(doctor_id);
   `);
 
-  // Seed default admin
-  const { rows } = await pool.query('SELECT COUNT(*) FROM doctors');
-  if (parseInt(rows[0].count) === 0) {
-    const hash = await bcrypt.hash('admin123', 10);
-    await pool.query(`INSERT INTO doctors (username,password_hash,name,qualifications,clinic_name,role) VALUES ('admin',$1,'Dr. Admin','MBBS','My Clinic','admin')`, [hash]);
-    console.log('Default admin created — admin / admin123');
-  }
+  // No default admin — doctors self-register via the Register page
 
   // VAPID setup
   if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
