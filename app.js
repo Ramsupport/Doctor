@@ -283,8 +283,9 @@ app.get('/api/patients', auth, async (req, res) => {
     let query, countQuery, params;
     if (search && search.trim()) {
       const s = `%${search.trim()}%`;
-      query = `SELECT * FROM patients WHERE doctor_id=$1 AND is_active=true AND (LOWER(name) LIKE LOWER($2) OR contact LIKE $2 OR LOWER(email) LIKE LOWER($2)) ORDER BY name ASC LIMIT $3 OFFSET $4`;
-      countQuery = `SELECT COUNT(*) FROM patients WHERE doctor_id=$1 AND is_active=true AND (LOWER(name) LIKE LOWER($2) OR contact LIKE $2 OR LOWER(email) LIKE LOWER($2))`;
+      const searchCond = `(LOWER(name) LIKE LOWER($2) OR contact LIKE $2 OR LOWER(email) LIKE LOWER($2) OR LOWER(address) LIKE LOWER($2) OR LOWER(blood_group) LIKE LOWER($2) OR LOWER(allergies) LIKE LOWER($2) OR LOWER(medical_history) LIKE LOWER($2) OR LOWER(notes) LIKE LOWER($2))`;
+      query = `SELECT * FROM patients WHERE doctor_id=$1 AND is_active=true AND ${searchCond} ORDER BY name ASC LIMIT $3 OFFSET $4`;
+      countQuery = `SELECT COUNT(*) FROM patients WHERE doctor_id=$1 AND is_active=true AND ${searchCond}`;
       params = [did, s, limit, offset];
     } else {
       query = `SELECT * FROM patients WHERE doctor_id=$1 AND is_active=true ORDER BY updated_at DESC LIMIT $2 OFFSET $3`;
@@ -304,7 +305,7 @@ app.get('/api/patients/search/quick', auth, async (req, res) => {
     const { q } = req.query;
     if (!q || q.length < 2) return res.json([]);
     const { rows } = await pool.query(
-      `SELECT id,name,contact,gender FROM patients WHERE doctor_id=$1 AND is_active=true AND (LOWER(name) LIKE LOWER($2) OR contact LIKE $2) LIMIT 10`,
+      `SELECT id,name,contact,gender FROM patients WHERE doctor_id=$1 AND is_active=true AND (LOWER(name) LIKE LOWER($2) OR contact LIKE $2 OR LOWER(email) LIKE LOWER($2) OR LOWER(address) LIKE LOWER($2) OR LOWER(blood_group) LIKE LOWER($2) OR LOWER(allergies) LIKE LOWER($2) OR LOWER(medical_history) LIKE LOWER($2) OR LOWER(notes) LIKE LOWER($2)) LIMIT 10`,
       [req.doctorId, `%${q}%`]
     );
     res.json(rows);
