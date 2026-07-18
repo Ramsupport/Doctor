@@ -317,8 +317,9 @@ app.get('/api/patients', auth, async (req, res) => {
     const offset = (page - 1) * limit;
     let query, countQuery, params;
     if (search && search.trim()) {
-      const s = `%${search.trim()}%`;
-      const searchCond = `(LOWER(name) LIKE LOWER($2) OR contact LIKE $2 OR LOWER(email) LIKE LOWER($2) OR LOWER(address) LIKE LOWER($2) OR LOWER(blood_group) LIKE LOWER($2) OR LOWER(allergies) LIKE LOWER($2) OR LOWER(medical_history) LIKE LOWER($2) OR LOWER(notes) LIKE LOWER($2))`;
+      // Replace spaces with wildcard to allow searching multiple disjointed terms
+      const s = `%${search.trim().replace(/\s+/g, '%')}%`;
+      const searchCond = `CONCAT_WS(' ', name, contact, email, address, blood_group, allergies, medical_history, notes) ILIKE $2`;
       query = `SELECT * FROM patients WHERE doctor_id=$1 AND is_active=true AND ${searchCond} ORDER BY name ASC LIMIT $3 OFFSET $4`;
       countQuery = `SELECT COUNT(*) FROM patients WHERE doctor_id=$1 AND is_active=true AND ${searchCond}`;
       params = [did, s, limit, offset];
@@ -339,9 +340,10 @@ app.get('/api/patients/search/quick', auth, async (req, res) => {
   try {
     const { q } = req.query;
     if (!q || q.length < 2) return res.json([]);
+    const s = `%${q.trim().replace(/\s+/g, '%')}%`;
     const { rows } = await pool.query(
-      `SELECT id,name,contact,gender FROM patients WHERE doctor_id=$1 AND is_active=true AND (LOWER(name) LIKE LOWER($2) OR contact LIKE $2 OR LOWER(email) LIKE LOWER($2) OR LOWER(address) LIKE LOWER($2) OR LOWER(blood_group) LIKE LOWER($2) OR LOWER(allergies) LIKE LOWER($2) OR LOWER(medical_history) LIKE LOWER($2) OR LOWER(notes) LIKE LOWER($2)) LIMIT 10`,
-      [req.doctorId, `%${q}%`]
+      `SELECT id,name,contact,gender FROM patients WHERE doctor_id=$1 AND is_active=true AND CONCAT_WS(' ', name, contact, email, address, blood_group, allergies, medical_history, notes) ILIKE $2 LIMIT 10`,
+      [req.doctorId, s]
     );
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
