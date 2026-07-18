@@ -223,7 +223,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div style="display:flex;align-items:center;gap:16px">
       <div class="quick-search">
         <span class="si">🔍</span>
-        <input type="text" id="global-search" placeholder="Search by name or phone..." autocomplete="off">
+        <input type="text" id="global-search" placeholder="Universal search..." autocomplete="off">
         <div class="quick-results" id="quick-results"></div>
       </div>
       <div class="user-info">
@@ -248,7 +248,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
     <div class="page" id="page-patients">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <div class="filter-bar" style="margin-bottom:0">
-          <input type="text" id="pt-search" placeholder="Search by name or phone..." style="width:280px">
+       <input type="text" id="pt-search" placeholder="Universal search..." style="width:280px">
           <button class="btn btn-sec" onclick="loadPatients()">Search</button>
         </div>
         <button class="btn btn-pri" onclick="openPatientModal()">+ New Patient</button>
@@ -458,7 +458,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 <div class="modal-overlay" id="appointment-modal"><div class="modal">
   <div class="modal-head"><h3>Book Appointment</h3><button class="modal-close" onclick="closeModal('appointment-modal')">&times;</button></div>
   <div class="modal-body"><input type="hidden" id="am-id"><div class="form-grid">
-    <div class="form-group full" id="am-patient-search-group"><label>Patient *</label><input type="text" id="am-patient-search" placeholder="Type name or phone..." autocomplete="off"><input type="hidden" id="am-patient-id"><div id="am-patient-results" style="border:1px solid var(--bdr);border-radius:var(--r);max-height:150px;overflow-y:auto;display:none;margin-top:4px"></div></div>
+    <div class="form-group full" id="am-patient-search-group"><label>Patient *</label><input type="text" id="am-patient-search" placeholder="Universal search..." autocomplete="off">
     <div class="form-group"><label>Date *</label><input type="date" id="am-date"></div>
     <div class="form-group"><label>Time</label><input type="time" id="am-time"></div>
     <div class="form-group full"><label>Reason</label><input type="text" id="am-reason"></div>
