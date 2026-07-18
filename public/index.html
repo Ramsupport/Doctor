@@ -173,15 +173,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   <div class="login-box">
     <div class="logo-icon">🏥</div>
     <h1>Clinic Manager</h1>
-    <div class="subtitle" id="auth-subtitle">Sign in to your account</div>
+    <div class="subtitle" id="auth-subtitle">Create a new doctor account</div>
     <div class="login-err" id="login-err"></div>
-    <!-- Login Form -->
-    <div id="login-form">
-      <input type="text" id="login-user" placeholder="Username" autofocus>
-      <input type="password" id="login-pass" placeholder="Password">
-      <button onclick="doLogin()">Sign In</button>
-      <p style="margin-top:16px;font-size:13px;color:var(--tx2)">Don't have an account? <a href="#" onclick="toggleAuthForm('register');return false" style="color:var(--pri);font-weight:500">Register</a></p>
+    <!-- Register Form -->
+    <div id="register-form">
+      <input type="text" id="reg-name" placeholder="Full Name (Dr. ...)" autofocus>
+      <input type="text" id="reg-user" placeholder="Username (letters, numbers, _)">
+      <input type="password" id="reg-pass" placeholder="Password (min 6 chars)">
+      <input type="text" id="reg-qual" placeholder="Qualifications (e.g. MBBS, MD)">
+      <input type="text" id="reg-clinic" placeholder="Clinic Name">
+      <button onclick="doRegister()">Create Account</button>
     </div>
+  </div>
+</div>
     <!-- Register Form -->
     <div id="register-form" style="display:none">
       <input type="text" id="reg-name" placeholder="Full Name (Dr. ...)">
@@ -504,35 +508,16 @@ function esc(s){if(!s)return'';const d=document.createElement('div');d.textConte
 function closeModal(id){document.getElementById(id).classList.remove('show')}
 
 // ═══ AUTH ═══
-async function doLogin() {
-  const username = document.getElementById('login-user').value.trim();
-  const password = document.getElementById('login-pass').value;
-  if (!username || !password) { document.getElementById('login-err').textContent = 'Enter username and password'; return; }
-  try {
-    const data = await fetch('/api/auth/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username, password}) }).then(r=>r.json());
-    if (data.error) { document.getElementById('login-err').textContent = data.error; return; }
-    TOKEN = data.token;
-    currentDoctor = data.doctor;
-    localStorage.setItem('cm_token', TOKEN);
-    showApp();
-  } catch(e) { document.getElementById('login-err').textContent = 'Login failed'; }
-}
-function doLogout() { TOKEN = null; currentDoctor = null; localStorage.removeItem('cm_token'); document.getElementById('app-shell').classList.remove('show'); document.getElementById('login-screen').style.display='flex'; toggleAuthForm('login'); }
-function toggleAuthForm(mode) {
+// ═══ AUTH ═══
+function doLogout() { 
+  TOKEN = null; 
+  currentDoctor = null; 
+  localStorage.removeItem('cm_token'); 
+  document.getElementById('app-shell').classList.remove('show'); 
+  document.getElementById('login-screen').style.display='flex'; 
   document.getElementById('login-err').textContent = '';
-  if (mode === 'register') {
-    document.getElementById('login-form').style.display = 'none';
-    document.getElementById('register-form').style.display = 'block';
-    document.getElementById('auth-subtitle').textContent = 'Create a new doctor account';
-    document.getElementById('reg-name').focus();
-  } else {
-    document.getElementById('register-form').style.display = 'none';
-    document.getElementById('login-form').style.display = 'block';
-    document.getElementById('auth-subtitle').textContent = 'Sign in to your account';
-    document.getElementById('login-user').focus();
-  }
 }
-document.getElementById('login-pass').addEventListener('keydown', e => { if(e.key==='Enter') doLogin(); });
+
 document.getElementById('reg-clinic')?.addEventListener('keydown', e => { if(e.key==='Enter') doRegister(); });
 
 async function doRegister() {
