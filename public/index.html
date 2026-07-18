@@ -906,6 +906,19 @@ async function executeRestore(){
   try{const result=await api('/api/restore',{method:'POST',body:window._pendingRestore});toast(`Restored: ${result.restored.patients} patients, ${result.restored.visits} visits`);document.getElementById('restore-preview').style.display='none';window._pendingRestore=null;document.getElementById('restore-file').value='';loadDashboard();}catch(e){toast(e.message,'err')}
 }
 
+async function exportReport(type){
+  const from=document.getElementById(type==='revenue'?'rev-from':type==='patients'?'pt-rpt-from':'vis-rpt-from').value;
+  const to=document.getElementById(type==='revenue'?'rev-to':type==='patients'?'pt-rpt-to':'vis-rpt-to').value;
+  try{
+    const res=await fetch(`/api/reports/export/${type}?from=${from}&to=${to}`,{headers:{'Authorization':'Bearer '+TOKEN}});
+    if(!res.ok)throw new Error('Export failed');
+    const blob=await res.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');a.href=url;a.download=`${type}_report.csv`;a.click();
+    URL.revokeObjectURL(url);
+  }catch(e){toast(e.message,'err')}
+}
+
 async function loadSystemStats(){
   try{const stats=await api('/api/backup/stats');document.getElementById('sys-stats-content').innerHTML=`
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px">
