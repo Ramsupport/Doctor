@@ -25,23 +25,6 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process
 const JWT_SECRET = process.env.JWT_SECRET || 'clinic-mgr-secret-change-me';
 const JWT_EXPIRY = '8h';
 
-// ─── Rate Limiter (login brute-force protection) ─────────────────
-const loginAttempts = new Map();
-function rateLimit(req, res, next) {
-  const ip = req.ip || req.connection.remoteAddress;
-  const now = Date.now();
-  const window = 60000; // 1 minute
-  const maxAttempts = 5;
-  const entry = loginAttempts.get(ip) || { count: 0, start: now };
-  if (now - entry.start > window) { entry.count = 0; entry.start = now; }
-  entry.count++;
-  loginAttempts.set(ip, entry);
-  if (entry.count > maxAttempts) return res.status(429).json({ error: 'Too many login attempts. Please wait 1 minute.' });
-  next();
-}
-// Clean up rate limiter every 5 minutes
-setInterval(() => { const now = Date.now(); for (const [k, v] of loginAttempts) { if (now - v.start > 60000) loginAttempts.delete(k); } }, 300000);
-
 // ─── Database Init ───────────────────────────────────────────────
 async function initDB() {
   await pool.query(`
@@ -182,20 +165,6 @@ async function sendPushToAll(payload) {
 }
 
 // ─── Auth Routes ─────────────────────────────────────────────────
-app.post('/api/auth/login', rateLimit, async (req, res) => {
-  try {
-    const { username, password } = req.body;
-    if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
-    const { rows } = await pool.query('SELECT * FROM doctors WHERE username=$1 AND is_active=true', [username]);
-    if (!rows.length) return res.status(401).json({ error: 'Invalid credentials' });
-    const doc = rows[0];
-    const valid = await bcrypt.compare(password, doc.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-    const token = jwt.sign({ id: doc.id, username: doc.username, role: doc.role }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
-    res.json({ token, doctor: { id: doc.id, name: doc.name, username: doc.username, role: doc.role, clinic_name: doc.clinic_name } });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
 // PUBLIC self-registration — any doctor can register
 app.post('/api/auth/register', async (req, res) => {
   try {
