@@ -669,7 +669,20 @@ async function loadPatients(page=1){
     pgEl.innerHTML=Array.from({length:totalPages},(_,i)=>`<button class="pg-btn ${i+1===page?'active':''}" onclick="loadPatients(${i+1})">${i+1}</button>`).join('');
   }catch(e){toast(e.message,'err')}
 }
-document.getElementById('pt-search').addEventListener('input', e => { if(e.target.value.trim() === '') loadPatients(); });
+let ptSearchTimeout;
+document.getElementById('pt-search').addEventListener('input', e => {
+  clearTimeout(ptSearchTimeout);
+  ptSearchTimeout = setTimeout(() => {
+    loadPatients();
+  }, 300);
+});
+
+document.getElementById('pt-search').addEventListener('keydown', e => { 
+  if(e.key === 'Enter') {
+    clearTimeout(ptSearchTimeout);
+    loadPatients();
+  }
+});
 
 function openPatientModal(p){
   document.getElementById('pm-title').textContent=p?'Edit Patient':'New Patient';
