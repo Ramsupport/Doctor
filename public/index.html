@@ -662,8 +662,8 @@ async function loadDashboard(){
     document.getElementById('dash-stats').innerHTML=`
       <div class="stat-card"><div class="sc-label">Total Patients</div><div class="sc-value">${d.total_patients}</div></div>
       <div class="stat-card amber"><div class="sc-label">Today's Appointments</div><div class="sc-value">${d.today_appointments}</div></div>
-      <div class="stat-card green"><div class="sc-label">Today's Revenue</div><div class="sc-value">₹${d.today_revenue.toLocaleString('en-IN')}</div></div>
       <div class="stat-card red"><div class="sc-label">Pending Payments</div><div class="sc-value">₹${d.pending_payments.toLocaleString('en-IN')}</div></div>`;
+    
     document.getElementById('dash-appointments').innerHTML = d.upcoming_appointments.length ? d.upcoming_appointments.map(a=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--bdr)"><div><div style="font-weight:500;cursor:pointer" onclick="navigateTo('profile',${a.patient_id})">${esc(a.patient_name)}</div><div style="font-size:12px;color:var(--tx2)">${a.appointment_time?fmtTime(a.appointment_time):'No time'} ${a.reason?'· '+esc(a.reason):''}</div></div><span class="badge ${a.status==='completed'?'badge-ok':'badge-info'}">${a.status}</span></div>`).join('') : '<div class="empty"><p>No appointments today</p></div>';
     document.getElementById('dash-recent').innerHTML = d.recent_patients.length ? d.recent_patients.map(p=>`<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--bdr);cursor:pointer" onclick="navigateTo('profile',${p.id})"><div><div style="font-weight:500">${esc(p.name)}</div><div style="font-size:12px;color:var(--tx2)">${esc(p.contact)}</div></div><span style="font-size:12px;color:var(--tx3)">${fmtDate(p.created_at)}</span></div>`).join('') : '<div class="empty"><p>No patients yet</p></div>';
   }catch(e){toast(e.message,'err')}
